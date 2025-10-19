@@ -1,0 +1,16 @@
+{
+  "name": "whatsapp-save-bot",
+  "version": "1.0.0",
+  "description": "Minimal Baileys-based WhatsApp bot that saves incoming media to ./downloads",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "you",
+  "license": "MIT",
+  "dependencies": {
+    "@adiwajshing/baileys": "^5.0.0",
+    "dotenv": "^16.0.0",
+    "node-fetch": "^2.6.7"
+  }
+}
