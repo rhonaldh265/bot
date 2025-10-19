@@ -1,155 +1,203 @@
 // index.js
 import makeWASocket, {
   useMultiFileAuthState,
-  downloadMediaMessage
+  downloadContentFromMessage,
+  WAMessageStubType
 } from '@whiskeysockets/baileys'
 import fs from 'fs-extra'
 import path from 'path'
-import { fileURLToPath } from 'url'
-import pino from 'pino'
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+const AUTH_DIR = './auth_info'
+const QR_FILE = 'qr.txt'
+const SAVE_DIR = './saved'
+const LOG_DIR = './logs'
 
-const AUTH_DIR = path.join(__dirname, 'auth_info')
-const SAVED_DIR = path.join(__dirname, 'saved')
-const QR_FILE = path.join(__dirname, 'qr.txt')
-const MSG_LOG = path.join(SAVED_DIR, 'messages.log')
-const MEDIA_LOG = path.join(SAVED_DIR, 'media.log')
+// ensure folders exist
+fs.ensureDirSync(AUTH_DIR)
+fs.ensureDirSync(SAVE_DIR)
+fs.ensureDirSync(LOG_DIR)
 
+/**
+ * Helper: write QR to disk (so server can show it)
+ */
+function saveQr(qr) {
+  try {
+    fs.writeFileSync(QR_FILE, qr, 'utf8')
+    console.log('🧾 QR saved to', QR_FILE)
+  } catch (e) {
+    console.error('Failed to write QR:', e)
+  }
+}
+
+/**
+ * Helper: delete QR file (after successful connect)
+ */
+function removeQr() {
+  try {
+    if (fs.existsSync(QR_FILE)) fs.unlinkSync(QR_FILE)
+  } catch (e) {
+    // ignore
+  }
+}
+
+/**
+ * Save metadata log
+ */
+function appendLog(filename, line) {
+  fs.appendFileSync(path.join(LOG_DIR, filename), line + '\n', 'utf8')
+}
+
+/**
+ * Download and save a media message (image, video, audio, document).
+ * messageContent is the message object for the media (e.g., msg.message.imageMessage)
+ */
+async function saveMedia(msgKey, messageContent, mediaType) {
+  try {
+    const stream = await downloadContentFromMessage(messageContent, mediaType)
+    // build filename
+    const timestamp = Date.now()
+    let ext = '.bin'
+    if (mediaType === 'image') ext = '.jpg'
+    if (mediaType === 'video') ext = '.mp4'
+    if (mediaType === 'audio') ext = '.ogg'
+    // for document, try to use mimetype extension if present
+    if (mediaType === 'document' && messageContent.mimetype) {
+      const mime = messageContent.mimetype
+      if (mime.includes('pdf')) ext = '.pdf'
+      else if (mime.includes('png')) ext = '.png'
+      else if (mime.includes('zip')) ext = '.zip'
+      else if (mime.includes('jpeg') || mime.includes('jpg')) ext = '.jpg'
+    }
+
+    const jidSafe = (msgKey.remoteJid || 'unknown').replace(/[:@]/g, '_')
+    const filename = path.join(SAVE_DIR, `${jidSafe}_${timestamp}${ext}`)
+    const writeStream = fs.createWriteStream(filename)
+
+    for await (const chunk of stream) {
+      writeStream.write(chunk)
+    }
+    writeStream.end()
+
+    const meta = `${new Date().toISOString()} | ${msgKey.remoteJid} | ${mediaType} | ${filename}`
+    appendLog('media.log', meta)
+    console.log('✅ Saved media to', filename)
+    return filename
+  } catch (err) {
+    console.error('Error saving media:', err)
+    appendLog('errors.log', `${new Date().toISOString()} | saveMedia error | ${err.message}`)
+    return null
+  }
+}
+
+/**
+ * Start the bot: exported so server.js can call it.
+ */
 export async function startBot() {
-  await fs.ensureDir(AUTH_DIR)
-  await fs.ensureDir(SAVED_DIR)
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
 
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
+    const sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      browser: ['WhatsAppSaveBot', 'Web', '1.0.0']
+    })
 
-  const sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false,
-    logger: logger,
-    browser: ['Ubuntu', 'Chrome', '22.04.4']
-  })
+    // save QR when generated and write to disk for server to serve
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, qr, lastDisconnect } = update
 
-  // Save credentials periodically
-  sock.ev.on('creds.update', saveCreds)
-
-  // connection updates — QR handling + reconnect logic
-  sock.ev.on('connection.update', (update) => {
-    try {
-      const { connection, qr } = update
       if (qr) {
-        logger.info('QR generated — saving to qr.txt')
-        fs.writeFileSync(QR_FILE, qr, 'utf8')
+        console.log('🧾 QR generated — saved to file for /qr page')
+        saveQr(qr)
       }
 
       if (connection === 'open') {
-        logger.info('✅ WhatsApp connection open')
-        if (fs.pathExistsSync(QR_FILE)) fs.removeSync(QR_FILE) // remove qr after successful login
+        console.log('✅ WhatsApp bot connected!')
+        removeQr() // remove QR after successful login
+        appendLog('events.log', `${new Date().toISOString()} | connected`)
       }
 
       if (connection === 'close') {
-        logger.warn('❌ Connection closed — attempting restart in 3s')
-        setTimeout(() => startBot().catch(e => logger.error(e)), 3000)
-      }
-    } catch (err) {
-      logger.error('connection.update error', err)
-    }
-  })
-
-  // message upsert: new messages, we save media and log text
-  sock.ev.on('messages.upsert', async (m) => {
-    try {
-      if (m.type !== 'notify') return
-      const messages = m.messages
-      for (const msg of messages) {
-        if (!msg.message) continue
-        // ignore broadcasts/status
-        if (msg.key && msg.key.remoteJid && msg.key.remoteJid.endsWith('@broadcast')) continue
-
-        const jid = msg.key.remoteJid || 'unknown'
-        const sender = jid
-        const ts = new Date().toISOString()
-        const types = Object.keys(msg.message)
-        const messageType = types[0]
-        logger.info({ jid, messageType }, 'Incoming message')
-
-        // log text messages (helps recover deleted text)
-        // different places for text: conversation, extendedTextMessage, imageMessage.caption, etc.
-        let text = null
-        if (msg.message.conversation) text = msg.message.conversation
-        else if (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) text = msg.message.extendedTextMessage.text
-        else if (msg.message?.imageMessage?.caption) text = msg.message.imageMessage.caption
-        else if (msg.message?.videoMessage?.caption) text = msg.message.videoMessage.caption
-        if (text) {
-          const line = `${ts} | ${sender} | text | ${text}\n`
-          fs.appendFileSync(MSG_LOG, line, 'utf8')
-        }
-
-        // media handling: images, video, audio, document, viewOnce variations
-        if (['imageMessage','videoMessage','audioMessage','documentMessage'].includes(messageType)) {
-          await saveMediaFromMessage(msg, messageType)
-        }
-
-        // view-once types can vary: viewOnceMessage or viewOnceMessageV2
-        if (messageType === 'viewOnceMessage' || messageType === 'viewOnceMessageV2') {
-          // get inner message
-          const inner = msg.message[messageType].message
-          // inner type may be imageMessage/videoMessage/documentMessage
-          const innerType = Object.keys(inner)[0]
-          await saveMediaFromMessage({ ...msg, message: inner }, innerType, true)
-        }
-      }
-    } catch (err) {
-      logger.error('messages.upsert error', err)
-    }
-  })
-
-  // optional: listen for message deletion events (Baileys emits message.delete events sometimes)
-  sock.ev.on('messages.delete', (info) => {
-    try {
-      const ts = new Date().toISOString()
-      const line = `${ts} | delete-event | ${JSON.stringify(info)}\n`
-      fs.appendFileSync(MSG_LOG, line, 'utf8')
-      logger.warn('message delete event', info)
-    } catch (e) {
-      logger.error('messages.delete handler error', e)
-    }
-  })
-
-  // helper to save media
-  async function saveMediaFromMessage(msg, messageType, wasViewOnce = false) {
-    try {
-      // messageType e.g. 'imageMessage' -> mediaKind 'image'
-      const mediaKind = messageType.replace('Message', '').toLowerCase() // image, video, audio, document
-      const jid = msg.key.remoteJid || 'unknown'
-      const ts = Date.now()
-      const jidSafe = jid.replace(/[:@]/g, '_')
-      // downloadMediaMessage from Baileys returns a Buffer when passed 'buffer'
-      const buffer = await downloadMediaMessage(msg.message[messageType], 'buffer', {}, { logger })
-      // choose extension
-      let ext = '.bin'
-      if (mediaKind === 'image') ext = '.jpg'
-      else if (mediaKind === 'video') ext = '.mp4'
-      else if (mediaKind === 'audio') ext = '.ogg'
-      else if (mediaKind === 'document' && msg.message[messageType].mimetype) {
-        const mime = msg.message[messageType].mimetype
-        if (mime.includes('pdf')) ext = '.pdf'
-        else if (mime.includes('zip')) ext = '.zip'
-        else if (mime.includes('png')) ext = '.png'
-        else if (mime.includes('jpg') || mime.includes('jpeg')) ext = '.jpg'
+        appendLog('events.log', `${new Date().toISOString()} | disconnected`)
+        console.log('❌ Connection closed — attempting restart in 3s')
+        // Try reconnect with small delay
+        setTimeout(() => startBot().catch(e => {
+          console.error('Restart failed:', e)
+          appendLog('errors.log', `${new Date().toISOString()} | restart failed | ${e.message}`)
+        }), 3000)
       }
 
-      const filename = path.join(SAVED_DIR, `${jidSafe}_${ts}${wasViewOnce ? '_viewonce' : ''}${ext}`)
-      await fs.writeFile(filename, buffer)
-      const logLine = `${new Date().toISOString()} | ${jid} | ${mediaKind}${wasViewOnce ? ' (view-once)' : ''} | ${filename}\n`
-      fs.appendFileSync(MEDIA_LOG, logLine, 'utf8')
-      logger.info({ filename, jid }, 'Saved media file')
-    } catch (err) {
-      logger.error('saveMediaFromMessage error', err)
-    }
+      if (lastDisconnect && lastDisconnect.error) {
+        appendLog('events.log', `${new Date().toISOString()} | lastDisconnect | ${JSON.stringify(lastDisconnect.error?.output || lastDisconnect.error)}`)
+      }
+    })
+
+    // persist credentials on update
+    sock.ev.on('creds.update', saveCreds)
+
+    // handle incoming messages
+    sock.ev.on('messages.upsert', async (m) => {
+      try {
+        if (m.type !== 'notify') return
+        const messages = m.messages
+        for (const msg of messages) {
+          if (!msg.message) continue
+          // avoid broadcast
+          if (msg.key && msg.key.remoteJid && msg.key.remoteJid.endsWith('@broadcast')) continue
+
+          const messageType = Object.keys(msg.message)[0]
+          console.log('📩 received type:', messageType, 'from:', msg.key.remoteJid)
+
+          // Save text messages to log so you can see deleted text later
+          let text = ''
+          if (msg.message.conversation) text = msg.message.conversation
+          else if (msg.message.extendedTextMessage && msg.message.extendedTextMessage.text) text = msg.message.extendedTextMessage.text
+          if (text) {
+            const line = `${new Date().toISOString()} | ${msg.key.remoteJid} | text | ${text}`
+            appendLog('messages.log', line)
+          }
+
+          // Media types (imageMessage, videoMessage, audioMessage, documentMessage)
+          if (['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'].includes(messageType)) {
+            const mediaKind = messageType.replace('Message', '').toLowerCase() // image, video, audio, document
+            const content = msg.message[messageType]
+            await saveMedia(msg.key, content, mediaKind)
+          }
+
+          // viewOnce types: older/newer lips — handle both possible keys
+          if (messageType === 'viewOnceMessage' || messageType === 'viewOnceMessageV2') {
+            // viewOnceMessageV2 structure: { viewOnceMessageV2: { message: { imageMessage: { ... } } } }
+            const viewKey = msg.message[messageType]
+            let inner = viewKey.message || viewKey
+            // inner might contain imageMessage, videoMessage, etc.
+            const innerType = Object.keys(inner)[0]
+            if (innerType) {
+              await saveMedia(msg.key, inner[innerType], innerType.replace('Message', '').toLowerCase())
+            }
+          }
+        }
+      } catch (err) {
+        console.error('messages.upsert error:', err)
+        appendLog('errors.log', `${new Date().toISOString()} | messages.upsert error | ${err.message}`)
+      }
+    })
+
+    // log deletes (Baileys may provide key info in "messages.delete" or stubTypes)
+    sock.ev.on('messages.delete', (info) => {
+      console.log('❌ messages.delete event:', info)
+      appendLog('events.log', `${new Date().toISOString()} | message.delete | ${JSON.stringify(info)}`)
+    })
+
+    // also listen for message stubs (for deletions or edits)
+    sock.ev.on('message-receipt.update', (r) => {
+      // optional: log receipts
+    })
+
+    // return the socket in case caller wants to use it
+    return sock
+  } catch (err) {
+    console.error('startBot error:', err)
+    appendLog('errors.log', `${new Date().toISOString()} | startBot error | ${err.message}`)
+    throw err
   }
-
-  // return sock for potential further use
-  return sock
 }
