@@ -1,17 +1,15 @@
 {
   "name": "whatsapp-save-bot",
   "version": "1.0.0",
-  "description": "Minimal Baileys-based WhatsApp bot that saves incoming media to ./downloads",
+  "description": "A WhatsApp bot that saves view-once media and deleted messages using Baileys.",
   "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js"
   },
-  "author": "you",
-  "license": "MIT",
   "dependencies": {
-    "@adiwajshing/baileys": "^5.0.0",
-    "dotenv": "^16.0.0",
-    "node-fetch": "^2.6.7",
+    "@whiskeysockets/baileys": "^6.7.1",
+    "qrcode-terminal": "^0.12.0",
     "fs-extra": "^11.1.1",
     "express": "^4.18.2"
   }
