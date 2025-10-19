@@ -1,47 +1,31 @@
-import makeWASocket, {
-  useMultiFileAuthState,
-  downloadMediaMessage
-} from '@whiskeysockets/baileys'
-import qrcode from 'qrcode-terminal'
-import fs from 'fs-extra'
+import makeWASocket, { useMultiFileAuthState } from '@whiskeysockets/baileys'
+import fs from 'fs'
 
-async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth')
+export async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info')
   const sock = makeWASocket({
+    printQRInTerminal: false, // no terminal QR
     auth: state,
-    printQRInTerminal: true,
+    browser: ['Ubuntu', 'Chrome', '22.04.4']
   })
 
-  sock.ev.on('creds.update', saveCreds)
+  // Event: Save QR for the web
+  sock.ev.on('connection.update', ({ connection, qr }) => {
+    if (qr) {
+      console.log('🧾 QR code generated. Open /qr to scan.')
+      fs.writeFileSync('qr.txt', qr)
+    }
 
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0]
-    if (!msg.message) return
+    if (connection === 'open') {
+      console.log('✅ WhatsApp bot connected successfully!')
+      if (fs.existsSync('qr.txt')) fs.unlinkSync('qr.txt') // remove QR after login
+    }
 
-    const from = msg.key.remoteJid
-    const type = Object.keys(msg.message)[0]
-    console.log(`📩 New message type: ${type}`)
-
-    // handle view-once
-    if (type === 'viewOnceMessageV2') {
-      const mediaMsg = msg.message.viewOnceMessageV2.message
-      const buffer = await downloadMediaMessage(
-        { message: mediaMsg },
-        'buffer',
-        {},
-        { logger: console }
-      )
-
-      fs.ensureDirSync('saved')
-      const filename = `saved/${Date.now()}.jpg`
-      fs.writeFileSync(filename, buffer)
-      console.log(`✅ View-once media saved: ${filename}`)
+    if (connection === 'close') {
+      console.log('❌ Connection closed. Reconnecting...')
+      startBot() // auto-restart
     }
   })
 
-  sock.ev.on('messages.delete', (info) => {
-    console.log('❌ Message deleted:', info)
-  })
+  sock.ev.on('creds.update', saveCreds)
 }
-
-startBot()
