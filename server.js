@@ -10,4 +10,15 @@ app.get("/", (req, res) => {
 });
 
 // auto start the bot
-exec("node index.j
+exec("node index.js", (error, stdout, stderr) => {
+  if (error) {
+    console.error(`❌ Bot error: ${error.message}`);
+    return;
+  }
+  if (stderr) console.error(stderr);
+  console.log(stdout);
+});
+
+app.listen(PORT, () => {
+  console.log(`🌍 Server running on port ${PORT}`);
+});
