@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-save-bot",
   "version": "1.0.0",
-  "description": "A WhatsApp bot that saves view-once media and deleted messages using Baileys.",
+  "description": "WhatsApp bot (Baileys) that saves incoming media (including view-once if received) and logs messages for deleted-message recovery. Render-ready with /qr page.",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.1",
     "express": "^4.18.2",
-    "qrcode": "^1.5.3",
-    "fs-extra": "^11.1.1"
+    "fs-extra": "^11.1.1",
+    "pino": "^8.11.0"
   }
 }
