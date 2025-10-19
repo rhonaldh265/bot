@@ -1,24 +1,33 @@
-import express from "express";
-import { exec } from "child_process";
+import express from 'express'
+import fs from 'fs'
+import { startBot } from './index.js'
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const app = express()
+const PORT = process.env.PORT || 10000
 
-// simple web page
-app.get("/", (req, res) => {
-  res.send("✅ WhatsApp Save Bot is running...");
-});
+// Start the WhatsApp bot
+startBot()
 
-// auto start the bot
-exec("node index.js", (error, stdout, stderr) => {
-  if (error) {
-    console.error(`❌ Bot error: ${error.message}`);
-    return;
+// Route: Display QR code
+app.get('/qr', (req, res) => {
+  if (fs.existsSync('qr.txt')) {
+    const qr = fs.readFileSync('qr.txt', 'utf-8')
+    res.send(`
+      <center>
+        <h2>📱 Scan this QR to link your WhatsApp</h2>
+        <img src="https://api.qrserver.com/v1/create-qr-code/?data=${qr}&size=300x300" />
+      </center>
+    `)
+  } else {
+    res.send('<center><h3>No QR available yet. Please wait...</h3></center>')
   }
-  if (stderr) console.error(stderr);
-  console.log(stdout);
-});
+})
+
+// Default route
+app.get('/', (req, res) => {
+  res.send('<center><h2>✅ Bot is running! Visit /qr to scan WhatsApp QR</h2></center>')
+})
 
 app.listen(PORT, () => {
-  console.log(`🌍 Server running on port ${PORT}`);
-});
+  console.log(`🌍 Server running on port ${PORT}`)
+})
